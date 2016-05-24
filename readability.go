@@ -6,15 +6,16 @@ import (
 	"io/ioutil"
 	"log"
 	"math"
+	//"os"
 	"regexp"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
-	"golang.org/x/net/html"
+	"github.com/golang/net/html"
 )
 
 var (
-	Logger = log.New(ioutil.Discard, "[readability] ", log.LstdFlags)
+	Logger = log.New(ioutil.Discard, "[readability] ", log.LstdFlags) //os.Stdout
 
 	replaceBrsRegexp   = regexp.MustCompile(`(?i)(<br[^>]*>[ \n\r\t]*){2,}`)
 	replaceFontsRegexp = regexp.MustCompile(`(?i)<(\/?)\s*font[^>]*?>`)
@@ -49,6 +50,10 @@ type Document struct {
 	content       string
 	candidates    map[*html.Node]*candidate
 	bestCandidate *candidate
+	charset       *goquery.Selection
+	author        *goquery.Selection
+	title        *goquery.Selection
+	lang           string
 
 	RemoveUnlikelyCandidates bool
 	WeightClasses            bool
@@ -58,6 +63,8 @@ type Document struct {
 	MinTextLength            int
 	RemoveEmptyNodes         bool
 	WhitelistTags            []string
+	keepImage                bool
+	KeepSpecialHead              bool
 }
 
 func NewDocument(s string) (*Document, error) {
@@ -70,6 +77,8 @@ func NewDocument(s string) (*Document, error) {
 		RetryLength:              250,
 		MinTextLength:            25,
 		RemoveEmptyNodes:         true,
+		keepImage:                true,
+		KeepSpecialHead:true,
 	}
 	err := d.initializeHtml(s)
 	if err != nil {
@@ -139,11 +148,56 @@ func (d *Document) Content() string {
 	return d.content
 }
 
+func (d *Document) ExtractSpecialHead() {
+	Head := d.document.Find("head")
+	if Head == nil {
+		return
+	}
+
+//extract charset
+//<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+ Head.Find("meta").Each(func(i int, s *goquery.Selection) {
+	 if attr , is := s.Attr("http-equiv"); is && strings.ToLower(attr) ==
+	                                                              strings.ToLower("Content-Type"){
+		   d.charset = s
+		}
+
+	if _, is := s.Attr("charset"); is {
+		d.charset = s
+	}
+	if author, is := s.Attr("name"); is && strings.ToLower(author) == "author" {
+		d.author = s
+	}
+
+})
+//extract Title
+Head.Find("title").Each(func(i int, s *goquery.Selection) {
+		d.title = s
+})
+
+}
+
+
 func (d *Document) prepareCandidates() {
+	 //extract lang
+	d.document.Find("html").Each(func(i int, s *goquery.Selection) {
+		if attr, ok := s.Attr("lang"); ok {
+				d.lang = attr
+				fmt.Printf(attr)
+		}
+    if d.KeepSpecialHead {
+			d.ExtractSpecialHead()
+		}
+
+
 	// noscript might be valid, but probably not so we'll just remove it
 	d.document.Find("script, style,noscript").Each(func(i int, s *goquery.Selection) {
 		removeNodes(s)
 	})
+
+//go through over
+
+})
 
 	if d.RemoveUnlikelyCandidates {
 		d.removeUnlikelyCandidates()
@@ -236,7 +290,6 @@ func (d *Document) transformMisusedDivsIntoParagraphs() {
 			Logger.Printf("Unable to transform div to p %s\n", err)
 			return
 		}
-
 		// transform <div>s that do not contain other block elements into <p>s
 		if !divToPElementsRegexp.MatchString(html) {
 			class, _ := s.Attr("class")
@@ -351,6 +404,10 @@ func (d *Document) scoreNode(s *goquery.Selection) *candidate {
 		contentScore -= 5
 	}
 
+	if s.Is("meta") {
+		fmt.Println(s)
+	}
+
 	return &candidate{s, float32(contentScore)}
 }
 
@@ -439,17 +496,48 @@ func (d *Document) sanitize(article string) string {
 					return
 				} else {
 					// replace node with children
-					replaceNodeWithChildren(node)
+					if strings.ToLower(node.Data) != "img" {
+						replaceNodeWithChildren(node)
+					}
 				}
 			}
 		}
 	})
+
+
+	if d.KeepSpecialHead {
+		d.RecoverSpecialHead(doc)
+	}
+	//fmt.Println(doc)
 
 	if text == "" {
 		text, _ = doc.Html()
 	}
 
 	return normalizeWhitespaceRegexp.ReplaceAllString(text, "\n")
+}
+
+func  (d *Document)RecoverSpecialHead(doc *goquery.Document)  {
+
+   if d.lang != "" {
+		 doc.Find("html").Each(func(i int, s *goquery.Selection) {
+		   s.SetAttr("lang", d.lang )
+	})
+  }
+
+/*insert Head*/
+ doc.Find("head").Each(func(i int, s *goquery.Selection) {
+
+	if d.charset != nil{
+		s.AppendSelection(d.charset)
+	}
+  if d.author != nil {
+		s.AppendSelection(d.author)
+	}
+	if d.title != nil {
+		s.AppendSelection(d.title)
+	}
+})
 }
 
 func (d *Document) cleanConditionally(s *goquery.Selection, selector string) {
@@ -517,6 +605,13 @@ func (d *Document) cleanConditionally(s *goquery.Selection, selector string) {
 			}
 		}
 	})
+}
+
+func  (d *Document)Title( )string {
+    if d.title != nil {
+			return d.title.Text()
+		}
+   return ""
 }
 
 func getName(s *goquery.Selection) string {
